@@ -35,4 +35,3 @@ labels:
   type_incident:     "Type/Incident"
   type_sr:           "Type/ServiceRequest"
   status_assigned:   "Status/Assigned"
-  status_cr_pending: "Status/CR Pending"

@@ -74,7 +74,7 @@ jobs:
                 body: `\u{2705} **ServiceNow Case Closed — ${caseRef}**\n\n> Case has been closed in ServiceNow.${resolutionBlock}\n\n---\n*Closed by ${snUser} via ServiceNow*`
               });
 
-              for (const label of ['Status/Assigned', 'Status/CR Pending']) {
+              for (const label of ['Status/Assigned']) {
                 try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: label }); } catch (_) {}
               }
 

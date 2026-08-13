@@ -37,10 +37,6 @@
   color: "0052cc"
   description: "ServiceNow case has been assigned to an agent"
 
-- name: "Status/CR Pending"
-  color: "fbca04"
-  description: "A Change Request is open in ServiceNow for this issue"
-
 - name: "CR/NormalChange"
   color: "0075ca"
   description: "Change Request class: Normal Change (also the ServiceNow case tag)"
