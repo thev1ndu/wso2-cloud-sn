@@ -55,15 +55,15 @@ jobs:
             const hasTemplateLabel =
               issueLabels.includes('Type/Incident') ||
               issueLabels.includes('Type/ServiceRequest') ||
-              issueLabels.some(l => l.startsWith('CatalogueItem/')) ||
               issueLabels.some(l => l.startsWith('SRType/'));
 
             const isTriggerLabel =
               labelName.startsWith('SRType/') ||
-              labelName.startsWith('CatalogueItem/') ||
               labelName === 'Type/Incident' ||
               labelName === 'Type/ServiceRequest';
 
+            // Change requests carry no template label — the [CR]:/[ECR]: title is
+            // what marks them for the pipeline.
             const titlePrefixed = (issue.title || '').startsWith('[CR]:') || (issue.title || '').startsWith('[ECR]:');
 
             const belongsToPipeline  = hasTemplateLabel || titlePrefixed;
@@ -235,6 +235,19 @@ jobs:
                 core.setOutput('failure_reason', '');
                 return;
               }
+              // Change request: identified by the [CR]: title; the change class
+              // comes from the CR/ label applied at validation time.
+              if (issueTitle.startsWith('[CR]:')) {
+                const crClassMap = { 'CR/NormalChange': 'Normal Change', 'CR/StandardChange': 'Standard Change', 'CR/EmergencyChange': 'Emergency Change' };
+                const crClassLabel = labels.find(l => crClassMap[l]);
+                core.setOutput('validation_passed', 'true');
+                core.setOutput('sr_type',       crClassLabel ? crClassMap[crClassLabel] : '');
+                core.setOutput('case_type',     'Service Request');
+                core.setOutput('catalog_item',  'Generic Requests');
+                core.setOutput('catalog_prefix', '');
+                core.setOutput('failure_reason', '');
+                return;
+              }
               if (labels.includes('Type/Incident')) {
                 core.setOutput('validation_passed', 'true');
                 core.setOutput('sr_type',       '');
@@ -260,7 +273,7 @@ jobs:
             // rather than matching a marker string in the body.
             const isIncident     = labels.includes('Type/Incident');
             const isEmergency    = issueBody.includes('Emergency Change') && issueTitle.startsWith('[ECR]:');
-            const isNormalChange = labels.some(l => l.startsWith('CatalogueItem/')) && issueTitle.startsWith('[CR]:');
+            const isNormalChange = issueTitle.startsWith('[CR]:');
             const isSRGeneric    = labels.includes('Type/ServiceRequest') && !issueTitle.startsWith('[CR]:');
 
             if (!isIncident && !isEmergency && !isNormalChange && !isSRGeneric) {
@@ -365,17 +378,11 @@ jobs:
               return;
             }
 
-            // The CatalogueItem/ label is applied statically by the template; the
-            // CR/ change-class label is applied HERE based on the "Change Request
+            // Change requests are identified by the [CR]: title alone (no catalog
+            // label); every CR routes to the single "Generic Requests" catalog.
+            // The CR/ change-class label is applied HERE from the "Change Request
             // Type" dropdown, so the human picks the change class in one field.
-            const catalogLabel = labels.find(l => l.startsWith('CatalogueItem/'));
-            if (!catalogLabel) {
-              await failValidation(
-                `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — SR Change\n\n> Missing \`CatalogueItem/\` label. This is applied automatically by the template — if missing, close and re-open using the **Service Request-Change** template.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`,
-                'Missing CatalogueItem label'
-              );
-              return;
-            }
+            const catalogItem = 'Generic Requests';
             if (!issueTitle.startsWith('[CR]:')) {
               await failValidation(
                 `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — SR Change\n\n> Issue title must start with \`[CR]:\`.\n\n> **Current title:** \`${issueTitle}\`\n\n> Edit the title to begin with \`[CR]:\` and save.\n\n---\n*Title format is required for change request routing.*`,
@@ -423,13 +430,13 @@ jobs:
             await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['validation-passed'] });
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
-              body: `\u{2705} **Template Validation Passed** — ${crType} (${catalogLabel})\n\n> Applied label \`${crLabel}\`. Case will be created in ServiceNow automatically, tagged \`${crLabel}\`.\n\n---\n*Automated via GitHub Actions*`
+              body: `\u{2705} **Template Validation Passed** — ${crType} (${catalogItem})\n\n> Applied label \`${crLabel}\`. Case will be created in ServiceNow automatically, tagged \`${crLabel}\`.\n\n---\n*Automated via GitHub Actions*`
             });
             core.setOutput('validation_passed', 'true');
             core.setOutput('sr_type',       crType);
             core.setOutput('case_type',     'Service Request');
-            core.setOutput('catalog_item',  catalogLabel.replace('CatalogueItem/', ''));
-            core.setOutput('catalog_prefix', catalogLabel);
+            core.setOutput('catalog_item',  catalogItem);
+            core.setOutput('catalog_prefix', '');
             core.setOutput('failure_reason', '');
 
   create-case:
@@ -452,26 +459,3 @@ jobs:
     with:
       issue_number: ${{ needs.gate.outputs.issue_number }}
       changed_fields: ${{ needs.gate.outputs.changed_fields }}
-
-  cr-watch:
-    needs: [gate, validate, create-case]
-    if: needs.create-case.outputs.sn_success == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/github-script@v8
-        env:
-          SERVICENOW_UI_URL: ${{ secrets.SERVICENOW_UI_URL }}
-        with:
-          script: |
-            const issueNumber = parseInt('${{ needs.gate.outputs.issue_number }}', 10);
-            const caseNumber = `${{ needs.create-case.outputs.case_number }}`;
-            const caseSysId  = `${{ needs.create-case.outputs.case_sys_id }}`;
-            const snUiUrl = process.env.SERVICENOW_UI_URL || '';
-            const caseUrl = caseSysId && snUiUrl
-              ? `${snUiUrl}/now/cwf/agent/record/sn_customerservice_case/${caseSysId}`
-              : '';
-            const caseDisplay = caseUrl ? `[${caseNumber}](${caseUrl})` : `**${caseNumber || 'created'}**`;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
-              body: `\u{D83D}\u{DC40} **Watching for Change Requests**\n\n> ServiceNow case ${caseDisplay} is monitored for CRs.\n\n---\n*GitHub Actions*`
-            });

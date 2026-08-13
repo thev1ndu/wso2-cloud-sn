@@ -12,7 +12,7 @@
 name: Service Request - Change (Normal / Standard / Emergency)
 description: Request a normal change service related to the project
 title: "[CR]: "
-labels: ["CatalogueItem/Generic Requests"]
+labels: []
 body:
 
   - type: dropdown
