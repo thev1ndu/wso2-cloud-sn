@@ -226,36 +226,57 @@
         gr.setValue(fieldName, newVal);
     }
 
-    // Priority
+    // Priority is a calculated field on sn_customerservice_case: ServiceNow
+    // recomputes it from Impact + Urgency during gr.update(), which silently
+    // overrides any priority we set directly (the "…has modified this field
+    // value" note on the case). To make the GitHub priority actually stick we
+    // set Impact and Urgency so the default matrix (priority = impact + urgency
+    // - 1, each 1..3) lands on the target, and set priority explicitly too so
+    // instances without the calc rule still get the right value.
     var priorityMap = {
         '1 - Critical': 1, 'Critical': 1,
         '2 - High': 2,     'High': 2,
         '3 - Moderate': 3, 'Moderate': 3, 'Medium': 3,
         '4 - Low': 4,      'Low': 4
     };
-    var newPriorityRaw = body.priority || '';
-    if (newPriorityRaw) {
-        var newPriority = priorityMap[newPriorityRaw] || 3;
-        var oldPriority = parseInt(gr.getValue('priority') || '3', 10);
-        if (oldPriority !== newPriority) {
-            changedFields.push('Priority');
-            gr.priority = newPriority;
-        }
-    }
-
     var impactMap = {
         'High': 1, '1 - High': 1, 'Critical': 1, '1 - Critical': 1,
         'Medium': 2, '2 - Medium': 2, 'Moderate': 2,
         'Low': 3, '3 - Low': 3, '4 - Low': 3
     };
-    var newImpactRaw = body.u_impact || '';
-    if (newImpactRaw) {
-        var newImpact = impactMap[newImpactRaw] || 2;
-        var oldImpact = parseInt(gr.getValue('impact') || '0', 10);
-        if (oldImpact !== newImpact) {
+
+    // Solve for the (impact, urgency) pair that makes the calc yield
+    // targetPriority, honouring an explicit template Impact when supplied.
+    function deriveImpactUrgency(targetPriority, explicitImpact) {
+        var p = parseInt(targetPriority, 10);
+        if (!p || p < 1) p = 3;
+        var i = parseInt(explicitImpact, 10);
+        if (!i || i < 1 || i > 3) i = (p <= 1) ? 1 : (p >= 4 ? 3 : 2);
+        var u = p - i + 1;
+        if (u < 1) u = 1;
+        if (u > 3) u = 3;
+        return { impact: i, urgency: u };
+    }
+
+    var newPriorityRaw = body.priority || '';
+    if (newPriorityRaw) {
+        var newPriority    = priorityMap[newPriorityRaw] || 3;
+        var explicitImpact = body.u_impact ? (impactMap[body.u_impact] || 2) : null;
+        var iu             = deriveImpactUrgency(newPriority, explicitImpact);
+
+        if (parseInt(gr.getValue('impact') || '0', 10) !== iu.impact) {
             changedFields.push('Impact');
-            gr.impact = newImpact;
+            gr.impact = iu.impact;
         }
+        if (gr.isValidField('urgency') && parseInt(gr.getValue('urgency') || '0', 10) !== iu.urgency) {
+            gr.urgency = iu.urgency;
+        }
+        if (parseInt(gr.getValue('priority') || '3', 10) !== newPriority) {
+            changedFields.push('Priority');
+        }
+        gr.priority = newPriority;
+
+        gs.info('GitHubCaseUpdate [PATCH]: Priority ' + newPriority + ' via impact=' + iu.impact + ', urgency=' + iu.urgency + ' for issue #' + issueNumber);
     }
 
     var newShortDesc = (body.u_short_description || rawTitle || '').trim();

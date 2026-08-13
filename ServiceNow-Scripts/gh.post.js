@@ -227,15 +227,33 @@
     };
     var snImpact = impact ? (impactMap[impact] || 2) : null;
 
-    gs.info('GitHubCaseIntegration [POST]: Creating new ' + templateType + ' case for issue #' + issueNumber);
+    // Priority on sn_customerservice_case is recalculated from Impact + Urgency
+    // on insert. Derive impact+urgency so the default matrix
+    // (priority = impact + urgency - 1, each 1..3) lands on the GitHub priority,
+    // and still set priority explicitly for instances without the calc rule.
+    function deriveImpactUrgency(targetPriority, explicitImpact) {
+        var p = parseInt(targetPriority, 10);
+        if (!p || p < 1) p = 3;
+        var i = parseInt(explicitImpact, 10);
+        if (!i || i < 1 || i > 3) i = (p <= 1) ? 1 : (p >= 4 ? 3 : 2);
+        var u = p - i + 1;
+        if (u < 1) u = 1;
+        if (u > 3) u = 3;
+        return { impact: i, urgency: u };
+    }
+    var iu = deriveImpactUrgency(snPriority, snImpact);
+
+    gs.info('GitHubCaseIntegration [POST]: Creating new ' + templateType + ' case for issue #' + issueNumber +
+            ' | priority=' + snPriority + ' via impact=' + iu.impact + ', urgency=' + iu.urgency);
 
     var gr = new GlideRecord('sn_customerservice_case');
     gr.initialize();
 
     gr.short_description     = title;
     gr.description           = description;
+    gr.impact                = iu.impact;
+    if (gr.isValidField('urgency')) gr.urgency = iu.urgency;
     gr.priority              = snPriority;
-    if (snImpact) gr.impact  = snImpact;
     gr.u_github_issue_number = issueNumber;
     gr.u_github_issue_url    = issueUrl;
     if (issueKey && gr.isValidField('u_github_issue_key')) gr.u_github_issue_key = issueKey;
