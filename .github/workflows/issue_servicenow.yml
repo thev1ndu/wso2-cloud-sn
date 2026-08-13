@@ -66,11 +66,16 @@ jobs:
 
             const titlePrefixed = (issue.title || '').startsWith('[CR]:') || (issue.title || '').startsWith('[ECR]:');
 
-            const shouldConsider =
+            const belongsToPipeline  = hasTemplateLabel || titlePrefixed;
+            // Events that can kick off case *creation*.
+            const isCreateTrigger =
               (action === 'labeled' && isTriggerLabel) ||
-              ((action === 'opened' || action === 'edited') && (hasTemplateLabel || titlePrefixed));
+              ((action === 'opened' || action === 'edited') && belongsToPipeline);
 
-            if (!shouldConsider) {
+            // Bail only for issues that have nothing to do with this pipeline.
+            // Any pipeline issue must still fall through so a surviving run can
+            // reconcile edits that a cancelled 'edited' run never synced.
+            if (!belongsToPipeline && !isCreateTrigger) {
               core.setOutput('should_run',    'false');
               core.setOutput('should_update', 'false');
               core.setOutput('issue_number',  String(issue.number));
@@ -80,12 +85,30 @@ jobs:
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number
             });
-            const caseDone  = comments.some(c => c.user.type === 'Bot' && c.body.includes('ServiceNow Case Created'));
+            const caseDone  = comments.some(c => c.user.type === 'Bot' && (c.body.includes('ServiceNow Case Created') || c.body.includes('ServiceNow Case Already Exists')));
             const crCreated = comments.some(c => c.user.type === 'Bot' && c.body.includes('ServiceNow Change Request — Created'));
-            const isEdit = (action === 'edited');
+
+            // What ServiceNow last received, keyed by a content hash the create/
+            // update workflows stamp into their bot comment. The pipeline serialises
+            // runs per issue and cancels older *pending* runs, so an 'edited' run can
+            // be cancelled by a later label-event run before it syncs. Comparing the
+            // live body hash to the last-synced hash lets whichever run survives
+            // detect and push the drift — the decision no longer depends on this run
+            // being the 'edited' event.
+            const crypto = require('crypto');
+            const normalize = b => (b || '').replace(/\r\n/g, '\n');
+            const currentHash = crypto.createHash('sha256').update(normalize(issue.body)).digest('hex');
+            const syncMarker = /<!-- sn-synced-hash: ([0-9a-f]+) -->/;
+            let lastSyncedHash = '';
+            for (const c of comments.slice().reverse()) {
+              if (c.user.type !== 'Bot') continue;
+              const m = c.body.match(syncMarker);
+              if (m) { lastSyncedHash = m[1]; break; }
+            }
+            const bodyDrifted = currentHash !== lastSyncedHash;
 
             let changedFields = '';
-            if (caseDone && isEdit && !crCreated) {
+            if (caseDone && !crCreated && bodyDrifted) {
               // Inline extractByLabel — mirrors .github/scripts/extractFields.js extractByLabel().
               // Cannot use require() here (no checkout step in this workflow).
               function extractFields(body) {
@@ -120,8 +143,8 @@ jobs:
               changedFields = JSON.stringify(changed);
             }
 
-            core.setOutput('should_run',     String(!caseDone));
-            core.setOutput('should_update',  String(caseDone && isEdit && !crCreated));
+            core.setOutput('should_run',     String(!caseDone && isCreateTrigger));
+            core.setOutput('should_update',  String(caseDone && !crCreated && bodyDrifted));
             core.setOutput('issue_number',   String(issue.number));
             core.setOutput('label_name',     labelName);
             core.setOutput('changed_fields', changedFields);

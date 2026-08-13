@@ -218,11 +218,16 @@ jobs:
         uses: actions/github-script@v8
         env:
           ALL_FIELDS_JSON: ${{ steps.extract_fields.outputs.all_fields }}
+          ISSUE_BODY: ${{ steps.get_issue.outputs.issue_body }}
         with:
           script: |
             const fs = require('fs');
+            const crypto = require('crypto');
             const { buildCaseUrl } = require('./.github/scripts/snHelpers.js');
             const issueNum = parseInt('${{ steps.resolve.outputs.issue_number }}');
+            // Content hash of the body we just sent to ServiceNow. The gate compares
+            // this against the live issue body to detect edits that still need syncing.
+            const syncedHash = crypto.createHash('sha256').update((process.env.ISSUE_BODY || '').replace(/\r\n/g, '\n')).digest('hex');
             let response = {};
             try { response = JSON.parse(fs.readFileSync('response.json', 'utf8')); if (response.result) response = response.result; } catch (_) {}
             const caseNumber = response.case_number || 'Unknown';
@@ -238,7 +243,7 @@ jobs:
 
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNum,
-              body: `${emoji} **ServiceNow Case ${verb} — ${caseLink}**\n\n<!-- sn-sys-id: ${caseSysId} -->\n> **WSO2 Case ID:** ${wso2CaseId}\n> **Catalog:** ${{ steps.extract_fields.outputs.catalog_item }}\n> **Type:** ${{ steps.extract_fields.outputs.case_type }}\n> **Priority:** ${{ steps.extract_fields.outputs.priority }}\n> **Environment:** ${{ steps.extract_fields.outputs.environment }}\n\n_${Object.keys(allFields).length} fields auto-extracted._\n\n---\n*Automated via GitHub Actions*`
+              body: `${emoji} **ServiceNow Case ${verb} — ${caseLink}**\n\n<!-- sn-sys-id: ${caseSysId} -->\n<!-- sn-synced-hash: ${syncedHash} -->\n> **WSO2 Case ID:** ${wso2CaseId}\n> **Catalog:** ${{ steps.extract_fields.outputs.catalog_item }}\n> **Type:** ${{ steps.extract_fields.outputs.case_type }}\n> **Priority:** ${{ steps.extract_fields.outputs.priority }}\n> **Environment:** ${{ steps.extract_fields.outputs.environment }}\n\n_${Object.keys(allFields).length} fields auto-extracted._\n\n---\n*Automated via GitHub Actions*`
             });
 
       - if: failure() && steps.get_issue.outputs.should_process == 'true'

@@ -111,11 +111,16 @@ jobs:
         env:
           SERVICENOW_UI_URL:   ${{ secrets.SERVICENOW_UI_URL }}
           CHANGED_FIELDS:      ${{ inputs.changed_fields }}
+          ISSUE_BODY:          ${{ steps.get_issue.outputs.issue_body }}
         with:
           script: |
+            const crypto = require('crypto');
             const { buildCaseUrl } = require('./.github/scripts/snHelpers.js');
             const issueNum   = parseInt('${{ inputs.issue_number }}');
             const githubUser = context.actor;
+            // Hash of the body we just PATCHed — the gate reads this to know the
+            // issue is now in sync and further reconcile runs should no-op.
+            const syncedHash = crypto.createHash('sha256').update((process.env.ISSUE_BODY || '').replace(/\r\n/g, '\n')).digest('hex');
 
             let fieldsSynced = [];
             try { fieldsSynced = JSON.parse(process.env.CHANGED_FIELDS || '[]'); } catch (_) {}
@@ -140,7 +145,7 @@ jobs:
               ? '\n\n**Fields changed:** ' + fieldsSynced.join(', ')
               : '';
 
-            const newBody = `\u{1F504} **ServiceNow Case Updated by @${githubUser} — ${caseRef}**${changesBlock}\n\n---\n*Automated via GitHub Actions*`;
+            const newBody = `\u{1F504} **ServiceNow Case Updated by @${githubUser} — ${caseRef}**${changesBlock}\n\n<!-- sn-synced-hash: ${syncedHash} -->\n\n---\n*Automated via GitHub Actions*`;
 
             // Edit the previous update comment instead of creating a new one
             const prevUpdate = allComments.slice().reverse().find(c =>
