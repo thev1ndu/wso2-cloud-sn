@@ -15,15 +15,6 @@ title: "[CR]: "
 labels: ["CatalogueItem/Generic Requests"]
 body:
 
-  - type: input
-    id: template_marker
-    attributes:
-      label: "Template Marker"
-      description: "Do not remove or modify. Used for validation."
-      value: "Change Request"
-    validations:
-      required: true
-
   - type: dropdown
     id: u_change_request_type
     attributes:

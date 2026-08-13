@@ -48,8 +48,15 @@ jobs:
               return;
             }
 
-            const markers = ['SR Generic', 'Change Request', 'Incident', 'Emergency Change'];
-            const hasMarker = markers.some(m => (issue.body || '').includes(m));
+            // Each template applies an identifying label on creation (see
+            // .github/ISSUE_TEMPLATE/*.yml) — that, not a marker string in the
+            // body, is what tells us this issue belongs to the pipeline.
+            const issueLabels = (issue.labels || []).map(l => l.name);
+            const hasTemplateLabel =
+              issueLabels.includes('Type/Incident') ||
+              issueLabels.includes('Type/ServiceRequest') ||
+              issueLabels.some(l => l.startsWith('CatalogueItem/')) ||
+              issueLabels.some(l => l.startsWith('SRType/'));
 
             const isTriggerLabel =
               labelName.startsWith('SRType/') ||
@@ -61,7 +68,7 @@ jobs:
 
             const shouldConsider =
               (action === 'labeled' && isTriggerLabel) ||
-              ((action === 'opened' || action === 'edited') && (hasMarker || titlePrefixed));
+              ((action === 'opened' || action === 'edited') && (hasTemplateLabel || titlePrefixed));
 
             if (!shouldConsider) {
               core.setOutput('should_run',    'false');
@@ -225,11 +232,13 @@ jobs:
               // Shortcut inconclusive — fall through to full validation
             }
 
-            // Determine template type
-            const isIncident     = issueBody.includes('Incident');
+            // Determine template type — keyed off the label each template applies
+            // automatically (see .github/ISSUE_TEMPLATE/*.yml) plus the title prefix,
+            // rather than matching a marker string in the body.
+            const isIncident     = labels.includes('Type/Incident');
             const isEmergency    = issueBody.includes('Emergency Change') && issueTitle.startsWith('[ECR]:');
-            const isNormalChange = issueBody.includes('Change Request') && issueTitle.startsWith('[CR]:');
-            const isSRGeneric    = issueBody.includes('SR Generic') && !issueTitle.startsWith('[CR]:');
+            const isNormalChange = labels.some(l => l.startsWith('CatalogueItem/')) && issueTitle.startsWith('[CR]:');
+            const isSRGeneric    = labels.includes('Type/ServiceRequest') && !issueTitle.startsWith('[CR]:');
 
             if (!isIncident && !isEmergency && !isNormalChange && !isSRGeneric) {
               core.setOutput('validation_passed', 'false');

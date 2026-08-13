@@ -50,7 +50,6 @@ function extractAllFields(body) {
   const fields = {};
   const regex  = new RegExp(SECTION_REGEX.source, 'g');
   const knownFields = {
-    'template marker':                        'template_marker',
     'servicenow catalog item':                'catalog_item',
     'catalog item':                           'catalog_item',
     'case type':                              'case_type',
@@ -84,6 +83,9 @@ function extractAllFields(body) {
     const value = match[2].trim();
     if (EMPTY_VALUES.has(value) || !value) continue;
     const normalized = label.toLowerCase();
+    // Legacy issues may still carry the retired "Template Marker" field; never
+    // forward it to ServiceNow.
+    if (normalized === 'template marker') continue;
     const fieldId = knownFields[normalized]
       ?? ('u_' + label.replace(/[^\w\s-]/g, '').trim().toLowerCase().replace(/\s+/g, '_').replace(/^u_+/, ''));
     fields[fieldId] = linkifyAttachments(value);

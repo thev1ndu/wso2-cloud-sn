@@ -78,12 +78,19 @@ jobs:
             const catalogLabel = issue.labels.find(l => l.name.startsWith('CatalogueItem/'));
             const catalogItem  = catalogLabel ? catalogLabel.name.replace('CatalogueItem/', '') : 'General Requests';
 
-            const isIncident     = issue.body && issue.body.includes('Incident');
-            const isNormalChange = issue.body && issue.body.includes('Change Request') && issue.title.startsWith('[CR]:');
-            const isSRGeneric    = issue.body && issue.body.includes('SR Generic') && !issue.title.startsWith('[CR]:');
+            // Keyed off the label each template applies automatically (see
+            // .github/ISSUE_TEMPLATE/*.yml), not a marker string in the body.
+            const labelNames = issue.labels.map(l => l.name);
+            const isIncident = labelNames.includes('Type/Incident');
+            const crMap = {
+              'CR/NormalChange':    'Normal Change',
+              'CR/StandardChange':  'Standard Change',
+              'CR/EmergencyChange': 'Emergency Change'
+            };
+            const crLabel   = labelNames.find(l => crMap[l]);
 
             const caseType  = isIncident ? 'Incident' : 'Service Request';
-            const srType    = isNormalChange ? 'Normal Change' : '';
+            const srType    = crLabel ? crMap[crLabel] : '';
 
             core.setOutput('should_retry',  'true');
             core.setOutput('catalog_item',  catalogItem);
