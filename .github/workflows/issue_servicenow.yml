@@ -48,7 +48,7 @@ jobs:
               return;
             }
 
-            const markers = ['SR Generic', 'Change Request', 'Incident Report', 'Emergency Change'];
+            const markers = ['SR Generic', 'Change Request', 'Incident', 'Emergency Change'];
             const hasMarker = markers.some(m => (issue.body || '').includes(m));
 
             const isTriggerLabel =
@@ -209,7 +209,6 @@ jobs:
                 core.setOutput('validation_passed', 'true');
                 core.setOutput('sr_type',       '');
                 core.setOutput('case_type',     'Incident');
-                core.setOutput('catalog_item',  'Incident Management');
                 core.setOutput('catalog_prefix', 'Type/Incident');
                 core.setOutput('failure_reason', '');
                 return;
@@ -227,7 +226,7 @@ jobs:
             }
 
             // Determine template type
-            const isIncident     = issueBody.includes('Incident Report');
+            const isIncident     = issueBody.includes('Incident');
             const isEmergency    = issueBody.includes('Emergency Change') && issueTitle.startsWith('[ECR]:');
             const isNormalChange = issueBody.includes('Change Request') && issueTitle.startsWith('[CR]:');
             const isSRGeneric    = issueBody.includes('SR Generic') && !issueTitle.startsWith('[CR]:');
@@ -241,7 +240,7 @@ jobs:
             if (isIncident) {
               if (!labels.includes('Type/Incident')) {
                 await failValidation(
-                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Incident Report\n\n> Missing label \`Type/Incident\`. This is applied automatically by the template — if it is missing, close this issue and re-open using the **Bug Report / Incident** template.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`,
+                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Incident\n\n> Missing label \`Type/Incident\`. This is applied automatically by the template — if it is missing, close this issue and re-open using the **Bug Report / Incident** template.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`,
                   'Missing Type/Incident label'
                 );
                 return;
@@ -250,7 +249,7 @@ jobs:
               const missing  = required.filter(f => !getFieldValue(issueBody, f));
               if (missing.length) {
                 await failValidation(
-                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Incident Report\n\n> The following required fields are missing or empty:\n${missing.map(f => `> - **${f}**`).join('\n')}\n\n> Edit this issue, fill in the missing fields, and save — validation will re-run automatically.\n\n---\n*${missing.length} field(s) need attention.*`,
+                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Incident\n\n> The following required fields are missing or empty:\n${missing.map(f => `> - **${f}**`).join('\n')}\n\n> Edit this issue, fill in the missing fields, and save — validation will re-run automatically.\n\n---\n*${missing.length} field(s) need attention.*`,
                   'Missing: ' + missing.join(', ')
                 );
                 return;
@@ -258,11 +257,10 @@ jobs:
               await cleanValidationComments();
               try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: 'validation-failed' }); } catch (_) {}
               await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['validation-passed'] });
-              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body: `\u{2705} **Template Validation Passed** — Incident Report\n\n> Case will be created in ServiceNow automatically.\n\n---\n*Automated via GitHub Actions*` });
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body: `\u{2705} **Template Validation Passed** — Incident\n\n> Case will be created in ServiceNow automatically.\n\n---\n*Automated via GitHub Actions*` });
               core.setOutput('validation_passed', 'true');
               core.setOutput('sr_type',       '');
               core.setOutput('case_type',     'Incident');
-              core.setOutput('catalog_item',  'Incident Management');
               core.setOutput('catalog_prefix', 'Type/Incident');
               core.setOutput('failure_reason', '');
               return;

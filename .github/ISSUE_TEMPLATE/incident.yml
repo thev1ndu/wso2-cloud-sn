@@ -19,16 +19,7 @@ body:
     attributes:
       label: "Template Marker"
       description: "Do not remove or modify."
-      value: "Incident Report"
-    validations:
-      required: true
-
-  - type: input
-    id: catalog_item
-    attributes:
-      label: "ServiceNow Catalog Item"
-      description: "Do not modify."
-      value: "Incident Management"
+      value: "Incident"
     validations:
       required: true
 

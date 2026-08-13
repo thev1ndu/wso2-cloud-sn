@@ -78,7 +78,7 @@ jobs:
             const catalogLabel = issue.labels.find(l => l.name.startsWith('CatalogueItem/'));
             const catalogItem  = catalogLabel ? catalogLabel.name.replace('CatalogueItem/', '') : 'General Requests';
 
-            const isIncident     = issue.body && issue.body.includes('Incident Report');
+            const isIncident     = issue.body && issue.body.includes('Incident');
             const isNormalChange = issue.body && issue.body.includes('Change Request') && issue.title.startsWith('[CR]:');
             const isSRGeneric    = issue.body && issue.body.includes('SR Generic') && !issue.title.startsWith('[CR]:');
 
