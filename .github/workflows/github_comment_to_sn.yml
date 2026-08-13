@@ -1,0 +1,84 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+  
+name: GitHub Comment → ServiceNow
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: read
+  contents: read
+
+concurrency:
+  group: gh-comment-to-sn-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.comment.user.type != 'Bot' &&
+      !startsWith(github.event.comment.body, '/')
+    timeout-minutes: 5
+    steps:
+      - id: find_case
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const issueNumber = context.payload.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+            const caseComment = comments.find(c =>
+              c.user.type === 'Bot' &&
+              (c.body.includes('ServiceNow Case Created') || c.body.includes('ServiceNow Case Already Exists'))
+            );
+            if (!caseComment) { core.setOutput('has_case', 'false'); return; }
+            const tagMatch = caseComment.body.match(/<!-- sn-sys-id: ([a-f0-9]{32}) -->/);
+            const urlMatch = caseComment.body.match(/sys_id=([a-f0-9]{32})/);
+            const sysId = tagMatch ? tagMatch[1] : (urlMatch ? urlMatch[1] : '');
+            const caseNumMatch = caseComment.body.match(/\[([A-Z0-9]+)\]\(/);
+            const caseNumber = caseNumMatch ? caseNumMatch[1] : '';
+            core.setOutput('has_case',    sysId ? 'true' : 'false');
+            core.setOutput('sys_id',      sysId);
+            core.setOutput('case_number', caseNumber);
+
+      - if: steps.find_case.outputs.has_case == 'true'
+        env:
+          SYS_ID:               ${{ steps.find_case.outputs.sys_id }}
+          SERVICENOW_UI_URL:    ${{ secrets.SERVICENOW_UI_URL }}
+          SERVICENOW_USERNAME:  ${{ secrets.SERVICENOW_USERNAME }}
+          SERVICENOW_PASSWORD:  ${{ secrets.SERVICENOW_PASSWORD }}
+          COMMENT_BODY:         ${{ github.event.comment.body }}
+          GITHUB_USER:          ${{ github.event.comment.user.login }}
+          COMMENT_URL:          ${{ github.event.comment.html_url }}
+        run: |
+          NOTE_TEXT=$(jq -n \
+            --arg user "$GITHUB_USER" \
+            --arg url  "$COMMENT_URL" \
+            --arg body "$COMMENT_BODY" \
+            -r '($body | gsub("!\\[[^\\]]*\\]\\((?<url>[^\\s)]+)\\)"; "\(.url)")) as $cleanBody
+                | "@\($user) (GitHub Comment) [\($url)]\n\n\($cleanBody)"')
+          PAYLOAD=$(jq -n --arg note "$NOTE_TEXT" '{"comments": $note}')
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PATCH \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -u "${SERVICENOW_USERNAME}:${SERVICENOW_PASSWORD}" \
+            -d "$PAYLOAD" \
+            "${SERVICENOW_UI_URL}/api/now/table/sn_customerservice_case/${SYS_ID}")
+          echo "ServiceNow comment status: $HTTP_CODE"
+          if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "204" ]]; then
+            echo "::error::ServiceNow comment sync failed: HTTP $HTTP_CODE"
+            exit 1
+          fi

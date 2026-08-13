@@ -1,0 +1,447 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+
+name: GitHub Issue → ServiceNow
+on:
+  issues:
+    types: [opened, edited, labeled]
+
+concurrency:
+  group: sn-pipeline-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.c.outputs.should_run }}
+      should_update: ${{ steps.c.outputs.should_update }}
+      issue_number: ${{ steps.c.outputs.issue_number }}
+      label_name: ${{ steps.c.outputs.label_name }}
+      changed_fields: ${{ steps.c.outputs.changed_fields }}
+    steps:
+      - id: c
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labelName = context.payload.label?.name ?? '';
+            const action = context.payload.action || context.eventName;
+
+            if (issue.state === 'closed') {
+              core.setOutput('should_run',    'false');
+              core.setOutput('should_update', 'false');
+              core.setOutput('issue_number',  String(issue.number));
+              core.setOutput('label_name',    labelName);
+              return;
+            }
+
+            const markers = ['SR Generic', 'Change Request', 'Incident Report', 'Emergency Change'];
+            const hasMarker = markers.some(m => (issue.body || '').includes(m));
+
+            const isTriggerLabel =
+              labelName.startsWith('SRType/') ||
+              labelName.startsWith('CatalogueItem/') ||
+              labelName === 'Type/Incident' ||
+              labelName === 'Type/ServiceRequest';
+
+            const titlePrefixed = (issue.title || '').startsWith('[CR]:') || (issue.title || '').startsWith('[ECR]:');
+
+            const shouldConsider =
+              (action === 'labeled' && isTriggerLabel) ||
+              ((action === 'opened' || action === 'edited') && (hasMarker || titlePrefixed));
+
+            if (!shouldConsider) {
+              core.setOutput('should_run',    'false');
+              core.setOutput('should_update', 'false');
+              core.setOutput('issue_number',  String(issue.number));
+              core.setOutput('label_name',    labelName);
+              return;
+            }
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number
+            });
+            const caseDone  = comments.some(c => c.user.type === 'Bot' && c.body.includes('ServiceNow Case Created'));
+            const crCreated = comments.some(c => c.user.type === 'Bot' && c.body.includes('ServiceNow Change Request — Created'));
+            const isEdit = (action === 'edited');
+
+            let changedFields = '';
+            if (caseDone && isEdit && !crCreated) {
+              // Inline extractByLabel — mirrors .github/scripts/extractFields.js extractByLabel().
+              // Cannot use require() here (no checkout step in this workflow).
+              function extractFields(body) {
+                const fields = {};
+                const regex  = /###\s+([^\n]+)\s*\n+([^\n][\s\S]*?)(?=\n+###|\n*$)/g;
+                const empty  = new Set(['_No response_', 'No response']);
+                let m;
+                while ((m = regex.exec(body)) !== null) {
+                  const label = m[1].trim();
+                  const val   = m[2].trim();
+                  if (val && !empty.has(val) && !val.startsWith('<!--')) fields[label] = val;
+                }
+                return fields;
+              }
+              const oldBody = context.payload.changes?.body?.from !== undefined
+                ? context.payload.changes.body.from
+                : (issue.body || '');
+              const newBody = issue.body || '';
+              const oldFields = extractFields(oldBody);
+              const newFields = extractFields(newBody);
+              const allKeys = new Set([...Object.keys(oldFields), ...Object.keys(newFields)]);
+              const changed = [];
+              for (const key of allKeys) {
+                if ((oldFields[key] || '').trim() !== (newFields[key] || '').trim()) {
+                  changed.push(key);
+                }
+              }
+              if (context.payload.changes?.title?.from !== undefined &&
+                  context.payload.changes.title.from !== issue.title) {
+                changed.push('Title');
+              }
+              changedFields = JSON.stringify(changed);
+            }
+
+            core.setOutput('should_run',     String(!caseDone));
+            core.setOutput('should_update',  String(caseDone && isEdit && !crCreated));
+            core.setOutput('issue_number',   String(issue.number));
+            core.setOutput('label_name',     labelName);
+            core.setOutput('changed_fields', changedFields);
+
+  validate:
+    needs: gate
+    if: needs.gate.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      validation_passed: ${{ steps.v.outputs.validation_passed }}
+      sr_type: ${{ steps.v.outputs.sr_type }}
+      case_type: ${{ steps.v.outputs.case_type }}
+      catalog_item: ${{ steps.v.outputs.catalog_item }}
+      catalog_prefix: ${{ steps.v.outputs.catalog_prefix }}
+      failure_reason: ${{ steps.v.outputs.failure_reason }}
+    steps:
+      - id: v
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const issueNumber = context.payload.issue?.number ?? parseInt('${{ needs.gate.outputs.issue_number }}', 10);
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+            const issueTitle = issue.title || '';
+            const issueBody  = issue.body  || '';
+            const labels     = issue.labels.map(l => l.name);
+
+            const { data: commentsEarly } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+            const caseCreated = commentsEarly.some(c => c.user.type === 'Bot' && c.body.includes('ServiceNow Case Created'));
+
+            // Returns the trimmed value under a ### header, or null if missing/empty/placeholder.
+            function getFieldValue(body, fieldName) {
+              const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const regex = new RegExp(`###\\s*${escaped}\\s*\\n+([\\s\\S]*?)(?=\\n###|$)`, 'i');
+              const match = body.match(regex);
+              if (!match) return null;
+              const val = match[1].trim();
+              if (!val || val === '_No response_' || val === 'No response' || val.startsWith('<!--')) return null;
+              return val;
+            }
+
+            // Checkboxes-type fields always render every option (checked or not), so
+            // getFieldValue() is never blank — this checks at least one box is actually ticked.
+            function hasCheckedBox(body, fieldName) {
+              const val = getFieldValue(body, fieldName);
+              return !!(val && /-\s*\[x\]/i.test(val));
+            }
+
+            const VALIDATION_TAG = '<!-- validation-error -->';
+
+            async function cleanValidationComments() {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+              });
+              for (const c of comments) {
+                if (c.user.type === 'Bot' && c.body.includes(VALIDATION_TAG)) {
+                  await github.rest.issues.deleteComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: c.id });
+                }
+              }
+            }
+
+            async function failValidation(message, reason) {
+              await cleanValidationComments();
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body: message });
+              try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: 'validation-passed' }); } catch (_) {}
+              try { await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['validation-failed'] }); } catch (_) {}
+              core.setOutput('validation_passed', 'false');
+              core.setOutput('failure_reason', reason);
+              core.setFailed('Validation: ' + reason);
+            }
+
+            // Shortcut: already validated — re-derive outputs from labels.
+            // Guard: verify all derived outputs are non-empty before returning early.
+            if (issue.labels.some(l => l.name === 'validation-passed') && !caseCreated) {
+              const srTypeLabel  = labels.find(l => l.startsWith('SRType/'));
+              const catalogLabel = labels.find(l => l.startsWith('CatalogueItem/'));
+              const srType   = srTypeLabel  ? srTypeLabel.replace('SRType/', '')        : '';
+              const catalog  = catalogLabel ? catalogLabel.replace('CatalogueItem/', '') : '';
+              if (srTypeLabel && catalogLabel && srType && catalog) {
+                core.setOutput('validation_passed', 'true');
+                core.setOutput('sr_type',       srType);
+                core.setOutput('case_type',     'Service Request');
+                core.setOutput('catalog_item',  catalog);
+                core.setOutput('catalog_prefix', catalogLabel);
+                core.setOutput('failure_reason', '');
+                return;
+              }
+              if (labels.includes('Type/Incident')) {
+                core.setOutput('validation_passed', 'true');
+                core.setOutput('sr_type',       '');
+                core.setOutput('case_type',     'Incident');
+                core.setOutput('catalog_item',  'Incident Management');
+                core.setOutput('catalog_prefix', 'Type/Incident');
+                core.setOutput('failure_reason', '');
+                return;
+              }
+              if (labels.includes('Type/ServiceRequest')) {
+                core.setOutput('validation_passed', 'true');
+                core.setOutput('sr_type',       '');
+                core.setOutput('case_type',     'Service Request');
+                core.setOutput('catalog_item',  'General Requests');
+                core.setOutput('catalog_prefix', 'Type/ServiceRequest');
+                core.setOutput('failure_reason', '');
+                return;
+              }
+              // Shortcut inconclusive — fall through to full validation
+            }
+
+            // Determine template type
+            const isIncident     = issueBody.includes('Incident Report');
+            const isEmergency    = issueBody.includes('Emergency Change') && issueTitle.startsWith('[ECR]:');
+            const isNormalChange = issueBody.includes('Change Request') && issueTitle.startsWith('[CR]:');
+            const isSRGeneric    = issueBody.includes('SR Generic') && !issueTitle.startsWith('[CR]:');
+
+            if (!isIncident && !isEmergency && !isNormalChange && !isSRGeneric) {
+              core.setOutput('validation_passed', 'false');
+              core.setOutput('failure_reason', 'Not a recognised template');
+              return;
+            }
+
+            if (isIncident) {
+              if (!labels.includes('Type/Incident')) {
+                await failValidation(
+                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Incident Report\n\n> Missing label \`Type/Incident\`. This is applied automatically by the template — if it is missing, close this issue and re-open using the **Bug Report / Incident** template.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`,
+                  'Missing Type/Incident label'
+                );
+                return;
+              }
+              const required = ['Issue Summary', 'Detailed Description', 'Severity', 'Affected Environments'];
+              const missing  = required.filter(f => !getFieldValue(issueBody, f));
+              if (missing.length) {
+                await failValidation(
+                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Incident Report\n\n> The following required fields are missing or empty:\n${missing.map(f => `> - **${f}**`).join('\n')}\n\n> Edit this issue, fill in the missing fields, and save — validation will re-run automatically.\n\n---\n*${missing.length} field(s) need attention.*`,
+                  'Missing: ' + missing.join(', ')
+                );
+                return;
+              }
+              await cleanValidationComments();
+              try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: 'validation-failed' }); } catch (_) {}
+              await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['validation-passed'] });
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body: `\u{2705} **Template Validation Passed** — Incident Report\n\n> Case will be created in ServiceNow automatically.\n\n---\n*Automated via GitHub Actions*` });
+              core.setOutput('validation_passed', 'true');
+              core.setOutput('sr_type',       '');
+              core.setOutput('case_type',     'Incident');
+              core.setOutput('catalog_item',  'Incident Management');
+              core.setOutput('catalog_prefix', 'Type/Incident');
+              core.setOutput('failure_reason', '');
+              return;
+            }
+
+            if (isSRGeneric) {
+              if (!labels.includes('Type/ServiceRequest')) {
+                await failValidation(
+                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Service Request\n\n> Missing label \`Type/ServiceRequest\`. This is applied automatically by the template — if it is missing, close this issue and re-open using the **Service Request-Generic** template.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`,
+                  'Missing Type/ServiceRequest label'
+                );
+                return;
+              }
+              const required = ['Request Details', 'Description', 'Priority', 'Environment Details'];
+              const missing  = required.filter(f => !getFieldValue(issueBody, f));
+              if (missing.length) {
+                await failValidation(
+                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Service Request\n\n> The following required fields are missing or empty:\n${missing.map(f => `> - **${f}**`).join('\n')}\n\n> Edit this issue, fill in the missing fields, and save — validation will re-run automatically.\n\n---\n*${missing.length} field(s) need attention.*`,
+                  'Missing: ' + missing.join(', ')
+                );
+                return;
+              }
+              await cleanValidationComments();
+              try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: 'validation-failed' }); } catch (_) {}
+              await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['validation-passed'] });
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body: `\u{2705} **Template Validation Passed** — Service Request\n\n> Case will be created in ServiceNow automatically.\n\n---\n*Automated via GitHub Actions*` });
+              core.setOutput('validation_passed', 'true');
+              core.setOutput('sr_type',       '');
+              core.setOutput('case_type',     'Service Request');
+              core.setOutput('catalog_item',  'General Requests');
+              core.setOutput('catalog_prefix', 'Type/ServiceRequest');
+              core.setOutput('failure_reason', '');
+              return;
+            }
+
+            if (isEmergency) {
+              const srTypeLabel  = labels.find(l => l.startsWith('SRType/'));
+              const catalogLabel = labels.find(l => l.startsWith('CatalogueItem/'));
+              if (!srTypeLabel || !catalogLabel) {
+                const msg = !srTypeLabel && !catalogLabel
+                  ? `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Emergency Change\n\n> Missing both \`SRType/\` and \`CatalogueItem/\` labels. These are applied automatically by the template — if missing, close and re-open using the **Emergency Change** template.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`
+                  : !srTypeLabel
+                    ? `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Emergency Change\n\n> Missing \`SRType/\` label — you have \`${catalogLabel}\` but no SRType label.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`
+                    : `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Emergency Change\n\n> Missing \`CatalogueItem/\` label — you have \`${srTypeLabel}\` but no CatalogueItem label.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`;
+                await failValidation(msg, 'Missing required labels');
+                return;
+              }
+              const required = ['Issue Description', 'Priority', 'Requested Environments', 'System / User Impact', 'Impact Description', 'Implementation Steps', 'Rollback Plan', 'Emergency Approver'];
+              const missing  = required.filter(f => !getFieldValue(issueBody, f));
+              const checkboxRequired = ['Type of Change'];
+              const missingCheckboxes = checkboxRequired.filter(f => !hasCheckedBox(issueBody, f));
+              const allMissing = missing.concat(missingCheckboxes);
+              if (allMissing.length) {
+                await failValidation(
+                  `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — Emergency Change\n\n> The following required fields are missing or empty:\n${allMissing.map(f => `> - **${f}**`).join('\n')}\n\n> Edit this issue, fill in the missing fields (for checkbox fields, tick at least one box), and save — validation will re-run automatically.\n\n---\n*${allMissing.length} field(s) need attention.*`,
+                  'Missing: ' + allMissing.join(', ')
+                );
+                return;
+              }
+              await cleanValidationComments();
+              try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: 'validation-failed' }); } catch (_) {}
+              await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['validation-passed'] });
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body: `\u{2705} **Template Validation Passed** — Emergency Change\n\n> Case will be created in ServiceNow automatically.\n\n---\n*Automated via GitHub Actions*` });
+              core.setOutput('validation_passed', 'true');
+              core.setOutput('sr_type',       srTypeLabel.replace('SRType/', ''));
+              core.setOutput('case_type',     'Service Request');
+              core.setOutput('catalog_item',  catalogLabel.replace('CatalogueItem/', ''));
+              core.setOutput('catalog_prefix', catalogLabel);
+              core.setOutput('failure_reason', '');
+              return;
+            }
+
+            // The CatalogueItem/ label is applied statically by the template; the
+            // CR/ change-class label is applied HERE based on the "Change Request
+            // Type" dropdown, so the human picks the change class in one field.
+            const catalogLabel = labels.find(l => l.startsWith('CatalogueItem/'));
+            if (!catalogLabel) {
+              await failValidation(
+                `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — SR Change\n\n> Missing \`CatalogueItem/\` label. This is applied automatically by the template — if missing, close and re-open using the **Service Request-Change** template.\n\n---\n*Edit this issue or re-open with the correct template to fix.*`,
+                'Missing CatalogueItem label'
+              );
+              return;
+            }
+            if (!issueTitle.startsWith('[CR]:')) {
+              await failValidation(
+                `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — SR Change\n\n> Issue title must start with \`[CR]:\`.\n\n> **Current title:** \`${issueTitle}\`\n\n> Edit the title to begin with \`[CR]:\` and save.\n\n---\n*Title format is required for change request routing.*`,
+                'Title format invalid'
+              );
+              return;
+            }
+            // Map the chosen change class → the single CR/ label (also the SN tag
+            // name). Keep in sync with labels.yml and the tag map in
+            // ServiceNow-Scripts/gh.post.js.
+            const crMap = {
+              'Normal Change':    'CR/NormalChange',
+              'Standard Change':  'CR/StandardChange',
+              'Emergency Change': 'CR/EmergencyChange'
+            };
+            const crType = getFieldValue(issueBody, 'Change Request Type');
+            if (!crType || !crMap[crType]) {
+              await failValidation(
+                `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — SR Change\n\n> **Change Request Type** is missing or invalid. Pick one of: \`Normal Change\`, \`Standard Change\`, \`Emergency Change\`.\n\n> Edit this issue, choose a Change Request Type, and save — validation will re-run automatically.\n\n---\n*Change Request Type drives the CR/ label and the ServiceNow case tag.*`,
+                'Missing/invalid Change Request Type'
+              );
+              return;
+            }
+            const crLabel = crMap[crType];
+            const required = ['Short Description','Description','Priority','Impact','Impact Description (Overall)','Impact Description (Customer)','Environment Details','Affected Component','Affected Services','Service Outage/Downtime','Is a maintenance window required or not','Implementation Plan','Test Plan','Monitoring Checks'];
+            const missing  = required.filter(f => !getFieldValue(issueBody, f));
+            if (missing.length) {
+              await failValidation(
+                `${VALIDATION_TAG}\n\u{274C} **Template Validation Failed** — ${crType}\n\n> The following required fields are missing or empty:\n${missing.map(f => `> - **${f}**`).join('\n')}\n\n> Edit this issue, fill in the missing fields, and save — validation will re-run automatically.\n\n---\n*${missing.length} field(s) need attention.*`,
+                'Missing: ' + missing.join(', ')
+              );
+              return;
+            }
+            // Apply the correct CR/ label; strip any stale CR/ label left over from
+            // a previously-selected Change Request Type.
+            const staleClassLabels = labels.filter(l => l.startsWith('CR/') && l !== crLabel);
+            for (const l of staleClassLabels) {
+              try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: l }); } catch (_) {}
+            }
+            if (!labels.includes(crLabel)) {
+              try { await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: [crLabel] }); } catch (_) {}
+            }
+            await cleanValidationComments();
+            try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: 'validation-failed' }); } catch (_) {}
+            await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['validation-passed'] });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+              body: `\u{2705} **Template Validation Passed** — ${crType} (${catalogLabel})\n\n> Applied label \`${crLabel}\`. Case will be created in ServiceNow automatically, tagged \`${crLabel}\`.\n\n---\n*Automated via GitHub Actions*`
+            });
+            core.setOutput('validation_passed', 'true');
+            core.setOutput('sr_type',       crType);
+            core.setOutput('case_type',     'Service Request');
+            core.setOutput('catalog_item',  catalogLabel.replace('CatalogueItem/', ''));
+            core.setOutput('catalog_prefix', catalogLabel);
+            core.setOutput('failure_reason', '');
+
+  create-case:
+    needs: [gate, validate]
+    if: needs.validate.outputs.validation_passed == 'true'
+    uses: ./.github/workflows/servicenow_create_case.yml
+    secrets: inherit
+    with:
+      issue_number: ${{ needs.gate.outputs.issue_number }}
+      catalog_item: ${{ needs.validate.outputs.catalog_item }}
+      case_type: ${{ needs.validate.outputs.case_type }}
+      sr_type: ${{ needs.validate.outputs.sr_type }}
+      catalog_prefix: ${{ needs.validate.outputs.catalog_prefix }}
+
+  update-case:
+    needs: gate
+    if: needs.gate.outputs.should_update == 'true'
+    uses: ./.github/workflows/servicenow_update_case.yml
+    secrets: inherit
+    with:
+      issue_number: ${{ needs.gate.outputs.issue_number }}
+      changed_fields: ${{ needs.gate.outputs.changed_fields }}
+
+  cr-watch:
+    needs: [gate, validate, create-case]
+    if: needs.create-case.outputs.sn_success == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          SERVICENOW_UI_URL: ${{ secrets.SERVICENOW_UI_URL }}
+        with:
+          script: |
+            const issueNumber = parseInt('${{ needs.gate.outputs.issue_number }}', 10);
+            const caseNumber = `${{ needs.create-case.outputs.case_number }}`;
+            const caseSysId  = `${{ needs.create-case.outputs.case_sys_id }}`;
+            const snUiUrl = process.env.SERVICENOW_UI_URL || '';
+            const caseUrl = caseSysId && snUiUrl
+              ? `${snUiUrl}/now/cwf/agent/record/sn_customerservice_case/${caseSysId}`
+              : '';
+            const caseDisplay = caseUrl ? `[${caseNumber}](${caseUrl})` : `**${caseNumber || 'created'}**`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+              body: `\u{D83D}\u{DC40} **Watching for Change Requests**\n\n> ServiceNow case ${caseDisplay} is monitored for CRs.\n\n---\n*GitHub Actions*`
+            });

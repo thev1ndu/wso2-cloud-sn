@@ -1,0 +1,100 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+  
+name: ServiceNow Case Updates → GitHub
+
+on:
+  repository_dispatch:
+    types: [servicenow-case-update]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: sn-case-update-${{ github.event.client_payload.github_issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  case-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          SERVICENOW_UI_URL: ${{ secrets.SERVICENOW_UI_URL }}
+        with:
+          script: |
+            const p = context.payload.client_payload || {};
+            core.info('servicenow-case-update payload: ' + JSON.stringify(p));
+
+            const action      = p.action || '';
+            const issueNumber = parseInt(p.github_issue_number, 10);
+            const caseNumber  = p.case_number      || '';
+            const caseSysId   = p.case_sys_id      || '';
+            const snUser      = p.sn_user          || 'ServiceNow';
+            const resolution  = p.resolution_notes || '';
+            const assignedTo  = p.assigned_to      || '';
+
+            if (!issueNumber || !action) {
+              core.warning('Missing github_issue_number or action — skipping');
+              return;
+            }
+
+            const snUiUrl = process.env.SERVICENOW_UI_URL || '';
+            const caseUrl = caseSysId && snUiUrl
+              ? `${snUiUrl}/now/cwf/agent/record/sn_customerservice_case/${caseSysId}`
+              : '';
+            const caseRef = caseUrl ? `[#${caseNumber}](${caseUrl})` : (caseNumber || 'case');
+
+            const { data: existingComments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+
+            if (action === 'closed') {
+              const alreadyClosed = existingComments.some(c =>
+                c.user.type === 'Bot' && c.body.includes('ServiceNow Case Closed')
+              );
+              if (alreadyClosed) {
+                core.info('Duplicate close event — skipping');
+                return;
+              }
+
+              const resolutionBlock = resolution ? `\n> **Resolution:** ${resolution}` : '';
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{2705} **ServiceNow Case Closed — ${caseRef}**\n\n> Case has been closed in ServiceNow.${resolutionBlock}\n\n---\n*Closed by ${snUser} via ServiceNow*`
+              });
+
+              for (const label of ['Status/Assigned', 'Status/CR Pending']) {
+                try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name: label }); } catch (_) {}
+              }
+
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issueNumber, state: 'closed', state_reason: 'completed'
+              });
+
+              core.info(`GitHub issue #${issueNumber} closed — ServiceNow case ${caseNumber}`);
+
+            } else if (action === 'assigned') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{D83D}\u{DC64} **ServiceNow Case Assigned — ${caseRef}**\n\n> **Assigned to:** ${assignedTo}\n\n---\n*Assigned by ${snUser} via ServiceNow*`
+              });
+
+              try { await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['Status/Assigned'] }); } catch (_) {}
+
+              core.info(`GitHub issue #${issueNumber} notified of assignment to ${assignedTo}`);
+
+            } else {
+              core.warning(`Unknown action: ${action} — skipping`);
+            }

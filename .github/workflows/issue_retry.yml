@@ -1,0 +1,116 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+
+name: Issue · Retry Case Creation
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: read
+  actions: write
+
+concurrency:
+  group: issue_retry-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.comment.user.type != 'Bot' &&
+      contains(github.event.comment.body, '/retry')
+    timeout-minutes: 5
+    steps:
+      - id: check
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const issueNumber = context.payload.issue.number;
+            const commenter   = context.payload.comment.user.login;
+
+            const allowedRoles = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            if (!allowedRoles.includes(context.payload.comment.author_association)) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{26A0}\u{FE0F} **Retry skipped** — only repository collaborators can trigger \`/retry\`.\n\n---\n*Triggered by @${commenter}*`
+              });
+              core.setOutput('should_retry', 'false');
+              return;
+            }
+
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+
+            if (!issue.labels.some(l => l.name === 'validation-passed')) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{26A0}\u{FE0F} **Retry skipped** — issue #${issueNumber} has not passed validation yet.\n\nMake sure all required fields are filled in and the \`validation-passed\` label is present before retrying.\n\n---\n*Triggered by @${commenter}*`
+              });
+              core.setOutput('should_retry', 'false');
+              return;
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+
+            if (comments.some(c => c.user.type === 'Bot' && c.body.includes('ServiceNow Case Created'))) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{2139}\u{FE0F} **Retry skipped** — a ServiceNow case already exists for issue #${issueNumber}.\n\n---\n*Triggered by @${commenter}*`
+              });
+              core.setOutput('should_retry', 'false');
+              return;
+            }
+
+            const catalogLabel = issue.labels.find(l => l.name.startsWith('CatalogueItem/'));
+            const catalogItem  = catalogLabel ? catalogLabel.name.replace('CatalogueItem/', '') : 'General Requests';
+
+            const isIncident     = issue.body && issue.body.includes('Incident Report');
+            const isNormalChange = issue.body && issue.body.includes('Change Request') && issue.title.startsWith('[CR]:');
+            const isSRGeneric    = issue.body && issue.body.includes('SR Generic') && !issue.title.startsWith('[CR]:');
+
+            const caseType  = isIncident ? 'Incident' : 'Service Request';
+            const srType    = isNormalChange ? 'Normal Change' : '';
+
+            core.setOutput('should_retry',  'true');
+            core.setOutput('catalog_item',  catalogItem);
+            core.setOutput('case_type',     caseType);
+            core.setOutput('sr_type',       srType);
+
+      - id: trigger
+        if: steps.check.outputs.should_retry == 'true'
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueNumber = String(context.payload.issue.number);
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              workflow_id: 'servicenow_create_case.yml',
+              ref: context.ref || 'main',
+              inputs: {
+                issue_number: issueNumber,
+                catalog_item: '${{ steps.check.outputs.catalog_item }}',
+                case_type:    '${{ steps.check.outputs.case_type }}',
+                sr_type:      '${{ steps.check.outputs.sr_type }}'
+              }
+            });
+            const commenter = context.payload.comment.user.login;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: parseInt(issueNumber),
+              body: `\u{D83D}\u{DD01} **Case creation re-triggered** for issue #${issueNumber}.\n\nA new workflow run has been dispatched. You will see a confirmation comment once the case is created in ServiceNow.\n\n---\n*Triggered by @${commenter} via \`/retry\`*`
+            });

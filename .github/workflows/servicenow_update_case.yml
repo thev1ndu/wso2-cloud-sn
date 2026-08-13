@@ -1,0 +1,170 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+
+name: ServiceNow · Update Case
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: string
+      changed_fields:
+        required: false
+        type: string
+        default: '[]'
+    outputs:
+      sn_success:
+        value: ${{ jobs.update.outputs.sn_success }}
+
+concurrency:
+  group: servicenow-issue-${{ inputs.issue_number || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sn_success: ${{ steps.patch_servicenow.outputs.sn_success }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: get_issue
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const issueNumber = parseInt('${{ inputs.issue_number }}', 10);
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+            core.setOutput('issue_body',   issue.body || '');
+            core.setOutput('issue_title',  issue.title || '');
+            core.setOutput('issue_url',    issue.html_url || '');
+            core.setOutput('github_user',  issue.user.login || '');
+            core.setOutput('labels',       issue.labels.map(l => l.name).join(', '));
+
+      - id: extract_fields
+        uses: actions/github-script@v8
+        env:
+          ISSUE_BODY: ${{ steps.get_issue.outputs.issue_body }}
+        with:
+          script: |
+            const extractAllFields = require('./.github/scripts/extractFields.js');
+            const allFields = extractAllFields(process.env.ISSUE_BODY);
+            core.setOutput('all_fields', JSON.stringify(allFields));
+
+      - id: build_payload
+        env:
+          ALL_FIELDS:        ${{ steps.extract_fields.outputs.all_fields }}
+          ISSUE_TITLE:       ${{ steps.get_issue.outputs.issue_title }}
+          ISSUE_NUMBER:      ${{ inputs.issue_number }}
+          ISSUE_URL:         ${{ steps.get_issue.outputs.issue_url }}
+          GITHUB_USER_LOGIN: ${{ steps.get_issue.outputs.github_user }}
+          ISSUE_LABELS:      ${{ steps.get_issue.outputs.labels }}
+        run: |
+          ENV_VALUE=$(echo "$ALL_FIELDS" | jq -r '.u_project_environment // "Not specified"')
+          FORMATTED_DESCRIPTION=$(echo "$ALL_FIELDS" | jq -r '(to_entries | map(select(.key != "u_project_environment")) | map("<strong>" + (.key | gsub("^u_";"") | gsub("_";" ") | ascii_upcase) + ":</strong><br/>" + (.value | gsub("\n";"<br/>")) + "<br/><br/>") | join("")) + "<br/><strong>─────────────────────────────────────</strong><br/>"')
+          FORMATTED_DESCRIPTION="<span style=\"color:red;font-weight:bold;font-size:2em;\">ENVIRONMENT: ${ENV_VALUE}</span><br/><br/>${FORMATTED_DESCRIPTION}<strong>SOURCE:</strong> GitHub Issue #${ISSUE_NUMBER}<br/><strong>URL:</strong> ${ISSUE_URL}<br/><strong>Repository:</strong> ${{ github.repository }}<br/><strong>User:</strong> ${GITHUB_USER_LOGIN}<br/><strong>Labels:</strong> ${ISSUE_LABELS}<br/>"
+          echo "$ALL_FIELDS" | jq \
+            --arg title                "$ISSUE_TITLE" \
+            --arg issue_number         "$ISSUE_NUMBER" \
+            --arg issue_url            "$ISSUE_URL" \
+            --arg github_user          "$GITHUB_USER_LOGIN" \
+            --arg description          "$FORMATTED_DESCRIPTION" \
+            --arg repository_full_name "${{ github.repository }}" \
+            '. + {title: $title, issue_number: $issue_number, issue_url: $issue_url, github_user: $github_user, description: $description, repository_full_name: $repository_full_name, u_github_issue_key: ($repository_full_name + "#" + $issue_number)}' \
+            > update_payload.json
+
+      - id: patch_servicenow
+        run: |
+          HTTP_CODE=$(curl -X PATCH \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: GitHub-Actions-WSO2/1.0" \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            -d @update_payload.json \
+            --retry 3 --retry-delay 5 --retry-connrefused --retry-max-time 60 \
+            -w "%{http_code}" -o update_response.json -s \
+            "${{ secrets.SERVICENOW_URL }}")
+          echo "ServiceNow PATCH status: $HTTP_CODE"
+          cat update_response.json || echo "(no response body)"
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "sn_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "sn_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - if: success()
+        uses: actions/github-script@v8
+        env:
+          SERVICENOW_UI_URL:   ${{ secrets.SERVICENOW_UI_URL }}
+          CHANGED_FIELDS:      ${{ inputs.changed_fields }}
+        with:
+          script: |
+            const { buildCaseUrl } = require('./.github/scripts/snHelpers.js');
+            const issueNum   = parseInt('${{ inputs.issue_number }}');
+            const githubUser = context.actor;
+
+            let fieldsSynced = [];
+            try { fieldsSynced = JSON.parse(process.env.CHANGED_FIELDS || '[]'); } catch (_) {}
+
+            const { data: allComments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNum
+            });
+            const caseCreatedComment = allComments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('ServiceNow Case Created')
+            );
+            let caseNumber = '';
+            let caseSysId  = '';
+            if (caseCreatedComment) {
+              const tagMatch = caseCreatedComment.body.match(/<!-- sn-sys-id: ([a-f0-9]{32}) -->/);
+              caseSysId  = tagMatch ? tagMatch[1] : '';
+              const numMatch = caseCreatedComment.body.match(/Case Created — \[#([A-Z0-9]+)\]/);
+              caseNumber = numMatch ? numMatch[1] : '';
+            }
+            const caseUrl = buildCaseUrl(process.env.SERVICENOW_UI_URL, caseSysId);
+            const caseRef = caseUrl ? `[#${caseNumber}](${caseUrl})` : (caseNumber ? `#${caseNumber}` : '');
+            const changesBlock = fieldsSynced.length > 0
+              ? '\n\n**Fields changed:** ' + fieldsSynced.join(', ')
+              : '';
+
+            const newBody = `\u{1F504} **ServiceNow Case Updated by @${githubUser} — ${caseRef}**${changesBlock}\n\n---\n*Automated via GitHub Actions*`;
+
+            // Edit the previous update comment instead of creating a new one
+            const prevUpdate = allComments.slice().reverse().find(c =>
+              c.user.type === 'Bot' && c.body.includes('ServiceNow Case Updated')
+            );
+            if (prevUpdate) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: prevUpdate.id,
+                body: newBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issueNum, body: newBody
+              });
+            }
+
+      - if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: parseInt('${{ inputs.issue_number }}', 10),
+              body: `\u{274C} **ServiceNow Case Update Failed**\n\n[View workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n\n---\n*Contact support if the issue persists.*`
+            });

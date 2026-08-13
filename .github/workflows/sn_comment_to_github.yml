@@ -1,0 +1,88 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+
+name: ServiceNow Comment → GitHub
+
+on:
+  repository_dispatch:
+    types: [servicenow-note]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  post-comment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          SERVICENOW_UI_URL: ${{ secrets.SERVICENOW_UI_URL }}
+        with:
+          script: |
+            const p = context.payload.client_payload || {};
+            const issueNumber = parseInt(p.issue_number, 10);
+            const noteText = (p.note_text || '').replace(/\[\/?\s*code\s*\]/gi, '').trim();
+            const noteType = p.note_type || 'additional_comments';
+            const caseNumber = p.case_number || '';
+            const caseSysId = p.case_sys_id || '';
+            const snUser = p.sn_user || 'ServiceNow Agent';
+            if (!issueNumber || !noteText) {
+              core.warning('Missing issue_number or note_text — skipping');
+              return;
+            }
+            if (/\(GitHub Comment\)/.test(noteText)) {
+              core.info('Note originated from GitHub — skipping to prevent echo loop');
+              return;
+            }
+            if (/\(GitHub Actions\)/.test(noteText)) {
+              core.info('Note written by GitHub Actions integration — skipping');
+              return;
+            }
+            if (/\bwas updated from\b.+\bto\b/i.test(noteText)) {
+              core.info('System field-change entry — skipping');
+              return;
+            }
+            // Deduplication: skip if an identical note was already posted
+            const fingerprint = `<!-- sn-note-fp: ${Buffer.from(noteText.slice(0, 120)).toString('base64').slice(0, 40)} -->`;
+            const { data: existingComments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+            if (existingComments.some(c => c.user.type === 'Bot' && c.body.includes(fingerprint))) {
+              core.info('Duplicate SN note already posted — skipping');
+              return;
+            }
+
+            const snUiUrl = process.env.SERVICENOW_UI_URL || '';
+            const caseUrl = caseSysId && snUiUrl
+              ? `${snUiUrl}/now/cwf/agent/record/sn_customerservice_case/${caseSysId}`
+              : '';
+            const label = noteType === 'work_notes' ? '\u{1F4CB} **ServiceNow Work Note**'
+                        : noteType === 'update' ? '\u{1F4AC} **ServiceNow Update**'
+                        : '\u{1F4AC} **ServiceNow Comment**';
+            const caseRef = caseNumber
+              ? (caseUrl ? ` — Case [#${caseNumber}](${caseUrl})` : ` — Case #${caseNumber}`)
+              : '';
+            const newlineIndex = noteText.indexOf('\n');
+            const metaLine = newlineIndex !== -1 ? noteText.slice(0, newlineIndex).trim() : '';
+            const rawBody  = newlineIndex !== -1 ? noteText.slice(newlineIndex + 1) : noteText;
+            const bodyText = rawBody
+              .replace(/<br\s*\/?>/gi, '\n')
+              .replace(/<\/p>/gi, '\n')
+              .replace(/<[^>]+>/g, '')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
+            const formattedNote = metaLine ? `> ${metaLine}\n\n${bodyText}` : bodyText;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+              body: `${label}${caseRef}\n\n${formattedNote}\n\n---\n*Posted by ${snUser} via ServiceNow*\n${fingerprint}`
+            });

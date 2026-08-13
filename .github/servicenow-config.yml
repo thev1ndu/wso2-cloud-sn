@@ -1,0 +1,38 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+
+case:
+  category: "Issue"                                    # Category (choice) display value
+  account: "663737563b6e431091404c6aa5e45a9d"          # Account reference sys_id
+  announcement_type: "General"                         # Announcement Type (choice) display value
+  project: "21f7b7d63b6e431091404c6aa5e45abd"          # Project reference sys_id
+
+constants:
+  user_agent: "GitHub-Actions-WSO2/1.0"
+  case_view:  "wso2_cs_generic"
+
+markers:
+  case_created:  "ServiceNow Case Created"
+  case_exists:   "ServiceNow Case Already Exists"
+  case_closed:   "ServiceNow Case Closed"
+  case_updated:  "ServiceNow Case Updated"
+  cr_created:    "Change Request — Created"
+  echo_loop:     "(GitHub Comment)"
+  actions_echo:  "(GitHub Actions)"
+  validation_tag: "<!-- validation-error -->"
+
+labels:
+  validation_passed: "validation-passed"
+  validation_failed: "validation-failed"
+  type_incident:     "Type/Incident"
+  type_sr:           "Type/ServiceRequest"
+  status_assigned:   "Status/Assigned"
+  status_cr_pending: "Status/CR Pending"

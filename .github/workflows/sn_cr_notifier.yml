@@ -1,0 +1,122 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+
+name: ServiceNow Change Request → GitHub
+
+on:
+  repository_dispatch:
+    types: [servicenow-cr-update]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: sn_cr_notifier-${{ github.event.client_payload.github_issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  cr-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          SERVICENOW_UI_URL: ${{ secrets.SERVICENOW_UI_URL }}
+        with:
+          script: |
+            const p = context.payload.client_payload || {};
+            core.info('servicenow-cr-update payload: ' + JSON.stringify(p));
+
+            const issueNumber = parseInt(p.github_issue_number, 10);
+            const crNumber    = p.cr_number;
+            const crSysId     = p.cr_sys_id;
+            const caseSysId   = p.case_sys_id || '';
+            const action      = p.action;
+            const assignedTo  = (p.assigned_to && p.assigned_to !== 'null') ? p.assigned_to : '';
+
+            const STATE_MAP = {
+              '-5': 'New',
+              '-4': 'Assess',
+              '-3': 'Authorize',
+              '-2': 'Scheduled (CAB Approved)',
+              '-1': 'Implement',
+              '0':  'Review',
+              '3':  'Closed',
+            };
+            const rawState = String(p.cr_state || '').trim();
+            const crState  = STATE_MAP[rawState] || rawState;
+
+            const servicenowUiUrl = process.env.SERVICENOW_UI_URL;
+            const crUrl     = crSysId ? `${servicenowUiUrl}/now/nav/ui/classic/params/target/change_request.do?sys_id=${crSysId}` : '';
+            const crDisplay = crUrl   ? `[#${crNumber}](${crUrl})` : `#${crNumber}`;
+
+            const formatSNDate = s => (s && s !== 'null') ? s : '';
+            const plannedStart = formatSNDate(p.planned_start);
+            const plannedEnd   = formatSNDate(p.planned_end);
+
+            if (!issueNumber || !crNumber || !action) {
+              core.warning('Missing github_issue_number, cr_number, or action — skipping');
+              return;
+            }
+            if (action !== 'created' && action !== 'state_changed' && action !== 'dates_updated') {
+              core.warning('Unknown action: ' + action);
+              return;
+            }
+
+            const assignedBlock = assignedTo ? `\n> **Assigned to:** ${assignedTo}` : '';
+
+            if (action === 'created') {
+              const { data: existingComments } = await github.rest.issues.listComments({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+              });
+              const alreadyPosted = existingComments.some(c =>
+                c.user.type === 'Bot' &&
+                c.body.includes('Change Request — Created') &&
+                c.body.includes(`#${crNumber}`)
+              );
+              if (alreadyPosted) {
+                core.info(`Duplicate CR created event for ${crNumber} — skipping`);
+                return;
+              }
+
+              async function fetchAllCRs(parentSysId) {
+                if (!parentSysId) return [];
+                const auth = Buffer.from(`${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}`).toString('base64');
+                const queryUrl = `${servicenowUiUrl}/api/now/table/task?sysparm_query=parent=${parentSysId}^sys_class_name=change_request&sysparm_fields=number,state,sys_id&sysparm_display_value=true&sysparm_limit=50`;
+                const res = await fetch(queryUrl, { headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' } });
+                if (!res.ok) { core.warning('ServiceNow CR query failed: HTTP ' + res.status); return []; }
+                return (await res.json()).result || [];
+              }
+              let allCRs = await fetchAllCRs(caseSysId);
+              if (allCRs.length === 0) allCRs = [{ number: crNumber, sys_id: crSysId, state: crState }];
+              const crListMarkdown = allCRs.map(cr => {
+                const url  = cr.sys_id ? `${servicenowUiUrl}/now/nav/ui/classic/params/target/change_request.do?sys_id=${cr.sys_id}` : '';
+                const link = url ? `[${cr.number}](${url})` : cr.number;
+                return `- ${link} — ${STATE_MAP[String(cr.state).trim()] || cr.state || 'Unknown'}`;
+              }).join('\n');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{1F4AC} **ServiceNow Change Request — Created ${crDisplay}**\n\n> **State:** ${crState}\n\n**All Change Requests for this Case (${allCRs.length})**\n${crListMarkdown}\n\n---\n*Automatically notified by ServiceNow*`
+              });
+              try { await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels: ['Status/CR Pending'] }); } catch (_) {}
+            } else if (action === 'state_changed') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{1F4AC} **ServiceNow Change Request — Updated ${crDisplay}**\n\n> **State:** **${crState}**${assignedBlock}\n\n---\n*Automatically notified by ServiceNow*`
+              });
+            } else if (action === 'dates_updated') {
+              const cwBlock = (plannedStart || plannedEnd) ? `\n\n\u{23F0} **Change Window:** ${plannedStart || '—'} → ${plannedEnd || '—'}` : '';
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{1F4AC} **ServiceNow Change Request — Updated ${crDisplay}**\n\n> **State:** **${crState}**${assignedBlock}${cwBlock}\n\n---\n*Automatically notified by ServiceNow*`
+              });
+            }

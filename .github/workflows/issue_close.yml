@@ -1,0 +1,65 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC (http://www.wso2.com).
+#
+# This software is the property of WSO2 LLC and its suppliers, if any.
+# Dissemination of any information or reproduction of any material contained
+# herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+# You may not alter or remove any copyright or other notice from copies of this content.
+#
+# -------------------------------------------------------------------------------------
+  
+name: Issue · Close
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: issue_close-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.comment.user.type != 'Bot' &&
+      contains(github.event.comment.body, '/close')
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const issueNumber = context.payload.issue.number;
+            const commenter   = context.payload.comment.user.login;
+
+            const allowedRoles = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            if (!allowedRoles.includes(context.payload.comment.author_association)) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `\u{26A0} **Close skipped** — only repository collaborators can use \`/close\`.\n\n---\n*Triggered by @${commenter}*`
+              });
+              return;
+            }
+
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber
+            });
+            if (issue.state === 'closed') {
+              core.info('Issue already closed — skipping');
+              return;
+            }
+
+            await github.rest.issues.update({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: issueNumber, state: 'closed', state_reason: 'completed'
+            });
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+              body: `\u{2705} **Issue closed by @${commenter}**\n\n> Closed via \`/close\` command.\n\n---\n*Automated via GitHub Actions*`
+            });
