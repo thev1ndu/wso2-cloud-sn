@@ -67,7 +67,10 @@ jobs:
             --arg user "$GITHUB_USER" \
             --arg url  "$COMMENT_URL" \
             --arg body "$COMMENT_BODY" \
-            -r '($body | gsub("!\\[[^\\]]*\\]\\((?<url>[^\\s)]+)\\)"; "\(.url)")) as $cleanBody
+            -r '($body
+                  | gsub("<img[^>]*?\\ssrc=\"(?<src>[^\"]+)\"[^>]*>"; "\(.src)")
+                  | gsub("!\\[[^\\]]*\\]\\((?<u>[^\\s)]+)\\)"; "\(.u)")
+                ) as $cleanBody
                 | "@\($user) (GitHub Comment) [\($url)]\n\n\($cleanBody)"')
           PAYLOAD=$(jq -n --arg note "$NOTE_TEXT" '{"comments": $note}')
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \

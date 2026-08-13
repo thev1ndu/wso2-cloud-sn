@@ -74,6 +74,7 @@ jobs:
             const bodyText = rawBody
               .replace(/<br\s*\/?>/gi, '\n')
               .replace(/<\/p>/gi, '\n')
+              .replace(/<img[^>]*?\ssrc=["']([^"']+)["'][^>]*>/gi, '$1')
               .replace(/<[^>]+>/g, '')
               .replace(/\n{3,}/g, '\n\n')
               .trim() || noteText.trim();
