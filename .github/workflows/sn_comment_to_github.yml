@@ -32,10 +32,8 @@ jobs:
             const p = context.payload.client_payload || {};
             const issueNumber = parseInt(p.issue_number, 10);
             const noteText = (p.note_text || '').replace(/\[\/?\s*code\s*\]/gi, '').trim();
-            const noteType = p.note_type || 'additional_comments';
             const caseNumber = p.case_number || '';
             const caseSysId = p.case_sys_id || '';
-            const snUser = p.sn_user || 'ServiceNow Agent';
             if (!issueNumber || !noteText) {
               core.warning('Missing issue_number or note_text — skipping');
               return;
@@ -66,23 +64,20 @@ jobs:
             const caseUrl = caseSysId && snUiUrl
               ? `${snUiUrl}/now/cwf/agent/record/sn_customerservice_case/${caseSysId}`
               : '';
-            const label = noteType === 'work_notes' ? '\u{1F4CB} **ServiceNow Work Note**'
-                        : noteType === 'update' ? '\u{1F4AC} **ServiceNow Update**'
-                        : '\u{1F4AC} **ServiceNow Comment**';
-            const caseRef = caseNumber
-              ? (caseUrl ? ` — Case [#${caseNumber}](${caseUrl})` : ` — Case #${caseNumber}`)
+            const caseLink = caseNumber
+              ? (caseUrl ? `[#${caseNumber}](${caseUrl})` : `#${caseNumber}`)
               : '';
+            // Mirror just the case link + the note body — no label/meta/footer tags.
+            // The first line of the SN note is its metadata header, so drop it.
             const newlineIndex = noteText.indexOf('\n');
-            const metaLine = newlineIndex !== -1 ? noteText.slice(0, newlineIndex).trim() : '';
             const rawBody  = newlineIndex !== -1 ? noteText.slice(newlineIndex + 1) : noteText;
             const bodyText = rawBody
               .replace(/<br\s*\/?>/gi, '\n')
               .replace(/<\/p>/gi, '\n')
               .replace(/<[^>]+>/g, '')
               .replace(/\n{3,}/g, '\n\n')
-              .trim();
-            const formattedNote = metaLine ? `> ${metaLine}\n\n${bodyText}` : bodyText;
+              .trim() || noteText.trim();
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
-              body: `${label}${caseRef}\n\n${formattedNote}\n\n---\n*Posted by ${snUser} via ServiceNow*\n${fingerprint}`
+              body: `${caseLink ? caseLink + '\n\n' : ''}${bodyText}\n\n${fingerprint}`
             });
