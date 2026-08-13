@@ -75,8 +75,9 @@ jobs:
               return;
             }
 
-            const catalogLabel = issue.labels.find(l => l.name.startsWith('CatalogueItem/'));
-            const catalogItem  = catalogLabel ? catalogLabel.name.replace('CatalogueItem/', '') : 'General Requests';
+            // Change requests ([CR]: title) route to the single "Generic Requests"
+            // catalog; everything else uses the generic service-request catalog.
+            const catalogItem  = issue.title.startsWith('[CR]:') ? 'Generic Requests' : 'General Requests';
 
             // Keyed off the label each template applies automatically (see
             // .github/ISSUE_TEMPLATE/*.yml), not a marker string in the body.
