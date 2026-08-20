@@ -191,7 +191,8 @@ jobs:
             --arg repository_full_name "${{ github.repository }}" \
             --arg labels "$ISSUE_LABELS" \
             --arg description "$FORMATTED_DESCRIPTION" \
-            --arg u_service_request_category "$CATALOG_ITEM" \
+            --arg catalog_item "$CATALOG_ITEM" \
+            --arg u_service_request_category "General Requests" \
             --arg case_type "$CASE_TYPE" \
             --arg catalog_prefix "$CATALOG_PREFIX" \
             '. + {project: $project, category: $category, account: $account, announcement_type: $announcement_type, title: $title, issue_number: $issue_number, issue_url: $issue_url, u_github_issue_url: $u_github_issue_url, github_user: $github_user, repository_full_name: $repository_full_name, u_github_issue_key: ($repository_full_name + "#" + $issue_number), labels: $labels, description: $description, catalog_item: $catalog_item, u_service_request_category: $u_service_request_category, case_type: $case_type, catalog_prefix: $catalog_prefix}' > payload.json
